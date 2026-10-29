@@ -1443,6 +1443,23 @@ int sunxi_update_partinfo(void)
 	struct blk_desc *desc;
 	disk_partition_t info = { 0 };
 
+	/*
+	 * The normal Tina environment supplies mmc_root.  Keep the same root
+	 * mapping in the compiled-in fallback environment so a PhoenixCard image
+	 * can still boot when its env partition is absent.  The direct SD raw
+	 * image is DOS/MBR (rootfs=p2); the common Phoenix image is GPT
+	 * (rootfs=p7).  NOR uses the fixed logical MTD map (rootfs=mtd6).
+	 */
+	if ((storage_type == STORAGE_SD) || (storage_type == STORAGE_EMMC) ||
+	    (storage_type == STORAGE_EMMC3) || (storage_type == STORAGE_EMMC0)) {
+		if (sunxi_flash_is_dos_partition())
+			env_set("mmc_root", "/dev/mmcblk0p2");
+		else if (!env_get("mmc_root"))
+			env_set("mmc_root", "/dev/mmcblk0p7");
+	} else if (storage_type == STORAGE_NOR && !env_get("nor_root")) {
+		env_set("nor_root", "/dev/mtdblock6");
+	}
+
 	memset(root_part_name, 0, ROOT_PART_NAME_MAX_SIZE);
 	root_partition = env_get("root_partition");
 	if (root_partition)
