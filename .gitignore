@@ -1,0 +1,74 @@
+build/
+*.log
+
+# U-Boot source-tree build products.
+.*
+!.gitignore
+!.mailmap
+*.a
+*.bin
+*.cfgtmp
+*.dtb
+*.dtb.S
+*.elf
+*.exe
+*.gcda
+*.gcno
+*.i
+*.lex.c
+*.lst
+*.mod.c
+*.o
+*.o.*
+*.order
+*.patch
+*.s
+*.su
+*.swp
+*.tab.[ch]
+/build-*
+/fit-dtb.blob
+/MLO*
+/SPL*
+/System.map
+/u-boot*
+/boards.cfg
+/spl/
+/tpl/
+/defconfig
+/include/config/
+/include/generated/
+board/sunxi/sunxi_challenge.c
+patches-*
+.stgit-edit.txt
+patches
+series
+.gdb_history
+cscope.*
+/tags
+/ctags
+/etags
+GPATH
+GRTAGS
+GSYMS
+GTAGS
+*.orig
+*~
+\#*#
+prelink-riscv
+tools/sunxi_proftool
+
+# The out-of-tree wrapper creates this temporary board DTS.
+/arch/riscv/dts/.board-uboot.dts
+
+# Standalone Avaota-F1 build inputs.  These are source/configuration files,
+# not U-Boot build products; keep them visible to git add and remote clones.
+!board-config/
+!board-config/avaota-f1/
+!board-config/avaota-f1/**
+!arch/riscv/dts/sun300iw1p1*.dts
+!arch/riscv/dts/sun300iw1p1*.dtsi
+!configs/sun300iw1p1*_defconfig
+
+# board/sunxi/sunxi_challenge.c remains intentionally ignored: U-Boot creates
+# it from random data during `make prepare` and removes/recreates it as needed.
