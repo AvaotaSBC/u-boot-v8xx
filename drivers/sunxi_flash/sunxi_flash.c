@@ -53,20 +53,21 @@ int sunxi_flash_is_dos_partition(void)
 }
 
 #ifdef CONFIG_SUNXI_MBR_PARTITION
-static int sunxi_flash_gpt_header_valid(const u8 *probe)
+static int sunxi_flash_gpt_header_valid_at(const u8 *sector,
+						 lbaint_t expected_lba)
 {
-	const gpt_header *header = (const gpt_header *)(probe + 512);
+	const gpt_header *header = (const gpt_header *)sector;
 	u8 header_copy[512];
 	u32 header_size;
 	u32 saved_crc;
 
-	if (memcmp(probe + 512, "EFI PART", 8))
+	if (memcmp(sector, "EFI PART", 8))
 		return 0;
 
 	header_size = le32_to_cpu(header->header_size);
 	if (header_size < sizeof(gpt_header) || header_size > 512)
 		return 0;
-	if (le64_to_cpu(header->my_lba) != 1)
+	if (le64_to_cpu(header->my_lba) != expected_lba)
 		return 0;
 
 	saved_crc = le32_to_cpu(header->header_crc32);
@@ -75,6 +76,109 @@ static int sunxi_flash_gpt_header_valid(const u8 *probe)
 	       sizeof(header->header_crc32));
 
 	return crc32(0, header_copy, header_size) == saved_crc;
+}
+
+static int sunxi_flash_gpt_header_valid(const u8 *probe)
+{
+	return sunxi_flash_gpt_header_valid_at(probe + 512, 1);
+}
+
+/*
+ * PhoenixCard may resize the final UDISK entry for the physical card but leave
+ * the GPT entry-array CRC copied from the source image.  Repair only the
+ * header CRCs around the existing arrays.  The array itself is deliberately
+ * not copied from the backup GPT because the card product path may add its
+ * private "thisfile" entry there.
+ */
+static int sunxi_flash_repair_gpt_copy(lbaint_t header_lba)
+{
+	ALLOC_CACHE_ALIGN_BUFFER(u8, header_sector, 512);
+	ALLOC_CACHE_ALIGN_BUFFER(u8, entries,
+					GPT_ENTRY_NUMBERS * GPT_ENTRY_SIZE);
+	gpt_header *header = (gpt_header *)header_sector;
+	u64 entry_lba;
+	u64 entry_bytes;
+	u64 entry_blocks;
+	u32 entry_count;
+	u32 entry_size;
+	u32 calculated_crc;
+	u32 header_crc;
+	u32 header_size;
+	u32 flash_sectors;
+
+	flash_sectors = sunxi_flash_size();
+	if (header_lba >= flash_sectors ||
+		sunxi_flash_phyread((uint)header_lba, 1, header_sector) != 1)
+		return -1;
+
+	if (!sunxi_flash_gpt_header_valid_at(header_sector, header_lba))
+		return 0;
+
+	header_size = le32_to_cpu(header->header_size);
+	entry_count = le32_to_cpu(header->num_partition_entries);
+	entry_size = le32_to_cpu(header->sizeof_partition_entry);
+	entry_lba = le64_to_cpu(header->partition_entry_lba);
+	entry_bytes = (u64)entry_count * entry_size;
+	entry_blocks = (entry_bytes + 511) / 512;
+
+	if (entry_count == 0 || entry_count > GPT_ENTRY_NUMBERS ||
+		entry_size != GPT_ENTRY_SIZE ||
+		entry_bytes > (u64)GPT_ENTRY_NUMBERS * GPT_ENTRY_SIZE ||
+		entry_lba >= flash_sectors ||
+		entry_blocks > flash_sectors - entry_lba)
+		return -1;
+
+	if (sunxi_flash_phyread((uint)entry_lba, (uint)entry_blocks,
+					entries) != (int)entry_blocks)
+		return -1;
+
+	calculated_crc = crc32(0, entries, (u32)entry_bytes);
+	if (calculated_crc == le32_to_cpu(header->partition_entry_array_crc32))
+		return 0;
+
+	printf("sunxi: repairing GPT entry-array CRC at LBA %llu\n",
+		(unsigned long long)header_lba);
+	header->partition_entry_array_crc32 = cpu_to_le32(calculated_crc);
+	header->header_crc32 = 0;
+	header_crc = crc32(0, header_sector, header_size);
+	header->header_crc32 = cpu_to_le32(header_crc);
+
+	if (sunxi_flash_phywrite((uint)header_lba, 1, header_sector) != 1)
+		return -1;
+
+	return 1;
+}
+
+static int sunxi_flash_repair_gpt(void)
+{
+	ALLOC_CACHE_ALIGN_BUFFER(u8, primary_sector, 512);
+	gpt_header *primary = (gpt_header *)primary_sector;
+	u64 backup_lba;
+	int repaired = 0;
+	int ret;
+
+	if (get_boot_storage_type() != STORAGE_SD ||
+		sunxi_flash_phyread(1, 1, primary_sector) != 1 ||
+		!sunxi_flash_gpt_header_valid_at(primary_sector, 1))
+		return 0;
+
+	ret = sunxi_flash_repair_gpt_copy(1);
+	if (ret < 0)
+		return ret;
+	repaired |= ret;
+
+	backup_lba = le64_to_cpu(primary->alternate_lba);
+	if (backup_lba != 1 && backup_lba < sunxi_flash_size()) {
+		ret = sunxi_flash_repair_gpt_copy(backup_lba);
+		if (ret < 0)
+			return ret;
+		repaired |= ret;
+	}
+
+	if (repaired)
+		sunxi_flash_flush();
+
+	return repaired;
 }
 
 static int sunxi_flash_detect_dos_partition(void)
@@ -1026,6 +1130,8 @@ static int sunxi_flash_init_blk(void)
 	debug("sunxi flash init uboot\n");
 	sunxi_flash_blk_dev.if_type   = IF_TYPE_SUNXI_FLASH;
 #ifdef CONFIG_SUNXI_MBR_PARTITION
+	if (sunxi_flash_repair_gpt() < 0)
+		printf("sunxi: GPT CRC repair skipped after I/O error\n");
 	sunxi_flash_dos_partition = sunxi_flash_detect_dos_partition();
 	sunxi_flash_blk_dev.part_type = sunxi_flash_dos_partition ?
 		PART_TYPE_DOS : PART_TYPE_EFI;

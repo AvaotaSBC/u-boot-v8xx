@@ -20,4 +20,7 @@ NOR storage overlay. The SD U-Boot recognizes the Tina GPT common image and
 the DOS/MBR raw SD image; their roots are p7 and p2 respectively. NOR uses
 `/dev/mtdblock6`. The console is 115200 baud.
 
+For PhoenixCard, the SD variant recalculates stale GPT entry-array CRCs
+in-place and preserves the card-specific partition entries.
+
 No Tina build tree or vendor toolchain is required.
