@@ -53,21 +53,20 @@ int sunxi_flash_is_dos_partition(void)
 }
 
 #ifdef CONFIG_SUNXI_MBR_PARTITION
-static int sunxi_flash_gpt_header_valid_at(const u8 *sector,
-						 lbaint_t expected_lba)
+static int sunxi_flash_gpt_header_valid(const u8 *probe)
 {
-	const gpt_header *header = (const gpt_header *)sector;
+	const gpt_header *header = (const gpt_header *)(probe + 512);
 	u8 header_copy[512];
 	u32 header_size;
 	u32 saved_crc;
 
-	if (memcmp(sector, "EFI PART", 8))
+	if (memcmp(probe + 512, "EFI PART", 8))
 		return 0;
 
 	header_size = le32_to_cpu(header->header_size);
 	if (header_size < sizeof(gpt_header) || header_size > 512)
 		return 0;
-	if (le64_to_cpu(header->my_lba) != expected_lba)
+	if (le64_to_cpu(header->my_lba) != 1)
 		return 0;
 
 	saved_crc = le32_to_cpu(header->header_crc32);
@@ -76,186 +75,6 @@ static int sunxi_flash_gpt_header_valid_at(const u8 *sector,
 	       sizeof(header->header_crc32));
 
 	return crc32(0, header_copy, header_size) == saved_crc;
-}
-
-static int sunxi_flash_gpt_header_valid(const u8 *probe)
-{
-	return sunxi_flash_gpt_header_valid_at(probe + 512, 1);
-}
-
-/*
- * PhoenixCard may resize the final UDISK entry for the physical card but leave
- * the GPT entry-array CRC copied from the source image.  U-Boot can still
- * inspect the header, while Linux quite correctly rejects the whole GPT and
- * exposes only the protective MBR.  Repair only this narrow, recoverable case
- * before the partition layer is initialized.  A DOS MBR (the direct SD raw
- * image) has an invalid compatibility GPT header and never enters this path.
- *
- * Return 1 for a fully valid GPT copy, 2 for a valid header with a stale
- * entry-array CRC, 0 when the header is not present/valid, and -1 for an I/O
- * or structural error.  Keeping the entry array in the caller lets the
- * primary copy be rebuilt from the backup copy that U-Boot would otherwise
- * select as a fallback.
- */
-static int sunxi_flash_read_gpt_copy(lbaint_t header_lba, u8 *header_sector,
-				     u8 *entries, u32 *entry_bytes,
-				     u32 *entry_blocks)
-{
-	gpt_header *header = (gpt_header *)header_sector;
-	u64 entry_lba;
-	u64 bytes;
-	u64 blocks;
-	u32 entry_count;
-	u32 entry_size;
-	u32 flash_sectors;
-
-	flash_sectors = sunxi_flash_size();
-	if (header_lba >= flash_sectors ||
-		sunxi_flash_phyread((uint)header_lba, 1, header_sector) != 1)
-		return -1;
-
-	if (!sunxi_flash_gpt_header_valid_at(header_sector, header_lba))
-		return 0;
-
-	entry_count = le32_to_cpu(header->num_partition_entries);
-	entry_size = le32_to_cpu(header->sizeof_partition_entry);
-	entry_lba = le64_to_cpu(header->partition_entry_lba);
-	bytes = (u64)entry_count * entry_size;
-	blocks = (bytes + 511) / 512;
-
-	if (entry_count == 0 || entry_count > GPT_ENTRY_NUMBERS ||
-		entry_size != GPT_ENTRY_SIZE ||
-		bytes > (u64)GPT_ENTRY_NUMBERS * GPT_ENTRY_SIZE ||
-		entry_lba < 2 ||
-		entry_lba >= flash_sectors ||
-		blocks > flash_sectors - entry_lba)
-		return -1;
-
-	if (sunxi_flash_phyread((uint)entry_lba, (uint)blocks, entries) !=
-		(int)blocks)
-		return -1;
-
-	*entry_bytes = (u32)bytes;
-	*entry_blocks = (u32)blocks;
-	return crc32(0, entries, *entry_bytes) ==
-		le32_to_cpu(header->partition_entry_array_crc32) ? 1 : 2;
-}
-
-static int sunxi_flash_write_gpt_header(lbaint_t header_lba,
-					 u8 *header_sector, u32 entry_crc,
-					 const char *reason)
-{
-	gpt_header *header = (gpt_header *)header_sector;
-	u32 header_size = le32_to_cpu(header->header_size);
-	u32 header_crc;
-
-	if (reason)
-		printf("sunxi: repairing GPT entry-array CRC at LBA %llu %s\n",
-		       (unsigned long long)header_lba, reason);
-	header->partition_entry_array_crc32 = cpu_to_le32(entry_crc);
-	header->header_crc32 = 0;
-	header_crc = crc32(0, header_sector, header_size);
-	header->header_crc32 = cpu_to_le32(header_crc);
-
-	return sunxi_flash_phywrite((uint)header_lba, 1, header_sector) == 1 ?
-		1 : -1;
-}
-
-static int sunxi_flash_repair_gpt(void)
-{
-	ALLOC_CACHE_ALIGN_BUFFER(u8, primary_sector, 512);
-	ALLOC_CACHE_ALIGN_BUFFER(u8, backup_sector, 512);
-	ALLOC_CACHE_ALIGN_BUFFER(u8, entries,
-					GPT_ENTRY_NUMBERS * GPT_ENTRY_SIZE);
-	gpt_header *primary = (gpt_header *)primary_sector;
-	gpt_header *backup = (gpt_header *)backup_sector;
-	lbaint_t backup_lba[2];
-	u32 primary_bytes;
-	u32 primary_blocks;
-	u32 backup_bytes;
-	u32 backup_blocks;
-	u32 entry_crc;
-	uint flash_sectors;
-	int primary_state;
-	int backup_state;
-	int repaired = 0;
-	int ret;
-	unsigned int i;
-
-	if (get_boot_storage_type() != STORAGE_SD)
-		return 0;
-
-	flash_sectors = sunxi_flash_size();
-	if (sunxi_flash_phyread(1, 1, primary_sector) != 1)
-		return 0;
-	if (!sunxi_flash_gpt_header_valid_at(primary_sector, 1))
-		return 0;
-
-	primary_state = sunxi_flash_read_gpt_copy(1, primary_sector,
-						  entries,
-						  &primary_bytes,
-						  &primary_blocks);
-	/* A valid primary array needs no compatibility write. */
-	if (primary_state == 1)
-		return 0;
-	if (primary_state != 2)
-		return primary_state;
-
-	/*
-	 * PhoenixCard can leave the primary array stale while preserving the
-	 * valid backup array.  Try both the LBA advertised by the primary header
-	 * and the physical last sector, matching U-Boot's GPT fallback logic.
-	 */
-	/* Match part_efi.c first, then try the LBA advertised by the header. */
-	backup_lba[0] = flash_sectors ? flash_sectors - 1 : 0;
-	backup_lba[1] = le64_to_cpu(primary->alternate_lba);
-	for (i = 0; i < ARRAY_SIZE(backup_lba); i++) {
-		if (backup_lba[i] == 1 || backup_lba[i] >= flash_sectors ||
-			(i && backup_lba[i] == backup_lba[0]))
-			continue;
-
-		backup_state = sunxi_flash_read_gpt_copy(backup_lba[i],
-								 backup_sector, entries,
-								 &backup_bytes, &backup_blocks);
-		if (backup_state != 1 || backup_bytes != primary_bytes ||
-			backup_blocks != primary_blocks)
-			continue;
-
-		if (sunxi_flash_phywrite(
-				(uint)le64_to_cpu(primary->partition_entry_lba),
-				primary_blocks, entries) != primary_blocks)
-			return -1;
-
-		/* Keep the primary header paired with the backup selected above. */
-		primary->alternate_lba = cpu_to_le64(backup_lba[i]);
-		primary->last_usable_lba = backup->last_usable_lba;
-		entry_crc = crc32(0, entries, primary_bytes);
-		ret = sunxi_flash_write_gpt_header(1, primary_sector, entry_crc,
-							   "from backup GPT");
-		if (ret < 0)
-			return ret;
-		repaired = 1;
-		break;
-	}
-
-	if (!repaired) {
-		/* If no valid backup exists, retain the narrow original repair. */
-		ret = sunxi_flash_read_gpt_copy(1, primary_sector, entries,
-						&primary_bytes, &primary_blocks);
-		if (ret <= 0)
-			return ret;
-		entry_crc = crc32(0, entries, primary_bytes);
-		ret = sunxi_flash_write_gpt_header(1, primary_sector, entry_crc,
-							   "from primary GPT");
-		if (ret < 0)
-			return ret;
-		repaired = 1;
-	}
-
-	if (repaired)
-		sunxi_flash_flush();
-
-	return repaired;
 }
 
 static int sunxi_flash_detect_dos_partition(void)
@@ -1207,8 +1026,6 @@ static int sunxi_flash_init_blk(void)
 	debug("sunxi flash init uboot\n");
 	sunxi_flash_blk_dev.if_type   = IF_TYPE_SUNXI_FLASH;
 #ifdef CONFIG_SUNXI_MBR_PARTITION
-	if (sunxi_flash_repair_gpt() < 0)
-		printf("sunxi: GPT CRC repair skipped after I/O error\n");
 	sunxi_flash_dos_partition = sunxi_flash_detect_dos_partition();
 	sunxi_flash_blk_dev.part_type = sunxi_flash_dos_partition ?
 		PART_TYPE_DOS : PART_TYPE_EFI;
