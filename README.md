@@ -41,6 +41,13 @@ The fixed DOS compatibility mapping is only enabled after U-Boot detects the
 raw image's non-protective MBR, so the common image cannot accidentally read
 the raw SD offsets for `boot`.
 
+Some PhoenixCard versions leave the common image's primary GPT header valid
+but its entry array stale after writing a card-specific final partition. The
+SD U-Boot checks the backup GPT at the physical end of the card, copies a
+valid backup entry array into the primary array, and repairs the primary
+header CRC before loading `env`. If no valid backup is available, it retains a
+narrow primary-array CRC repair for older cards.
+
 The NOR variant retains the Allwinner logical MTD map. Its `rootfs` entry is
 the seventh logical entry (zero-based Linux MTD `mtd6`), while
 `rootfs_data` is `mtd7`; the boot environment therefore uses
