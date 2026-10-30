@@ -1,8 +1,7 @@
 # Avaota-F1 V821 U-Boot
 
-This repository contains the V821 U-Boot source at the top level. The
-Avaota-F1 board inputs are under `board-config/avaota-f1/uboot`; Allwinner
-image assembly is maintained by the separate `avaota-image-tools` repository.
+U-Boot source is kept at the repository top level. Board inputs are under
+`board-config/avaota-f1/uboot`; image assembly is in `avaota-image-tools`.
 
 Build with the Buildroot RISC-V32 compiler:
 
@@ -15,12 +14,11 @@ Build with the Buildroot RISC-V32 compiler:
 ```
 
 Variants are `nor`, `sd`, and `efex`. `nor` uses `storage_type = 3`, `sd`
-uses `storage_type = 1`, and `efex` is the USB/FEL updater variant using the
-NOR storage overlay. The SD U-Boot recognizes the Tina GPT common image and
-the DOS/MBR raw SD image; their roots are p7 and p2 respectively. NOR uses
+uses `storage_type = 1`, and `efex` is the USB/FEL updater variant. The raw
+SD image uses DOS/MBR with rootfs at `/dev/mmcblk0p2`; SPI-NOR uses
 `/dev/mtdblock6`. The console is 115200 baud.
 
-For PhoenixCard, the SD variant recalculates stale GPT entry-array CRCs
-in-place and preserves the card-specific partition entries.
+The Allwinner IMAGEWTY image is for SPI-NOR/PhoenixSuit. Write the SD raw
+image directly to an SD card.
 
 No Tina build tree or vendor toolchain is required.
